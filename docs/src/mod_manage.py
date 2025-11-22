@@ -1,5 +1,3 @@
-# Step 3: Backup AND organize mods by type
-
 import sys
 import os
 import shutil
@@ -151,3 +149,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+#code is working as intended
