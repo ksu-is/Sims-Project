@@ -5,7 +5,7 @@
 - [x] Create initial project structure (src folder, README, roadmap)
 - [x] Add script to select Mods folder and validate path
 - [x] Implement backup system to `_Backup/Mods_Backup_<timestamp>`
-- [ ] Scan all files in Mods folder and collect stats
+- [x] Scan all files in Mods folder and collect stats
 - [ ] Sort `.ts4script` into `Script_Mods` and `.package` into `Package_CC`
 - [ ] Move all other file types into `Other` folder inside `_Organized`
 
