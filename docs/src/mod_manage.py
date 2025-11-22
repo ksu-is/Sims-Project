@@ -1,41 +1,39 @@
-# Lets the user pick their Sims 4 Mods folder so we know what to organize!
+# Step 3: Backup AND organize mods by type
 
 import sys
+import os
 import shutil
 from pathlib import Path
 from datetime import datetime
 
-# We try to import Tkinter so we can use a folder picker window.
-# If it fails (like no display on some computers), we will skip the GUI.
 try:
     import tkinter as tk
     from tkinter import filedialog, messagebox
 except:
-    tk = None  # GUI is not available
+    tk = None
+
+
+SCRIPT_EXT = ".ts4script"
+PACKAGE_EXT = ".package"
 
 
 def pick_mods_folder():
-    """
-    Open a small window so the user can choose their Mods folder.
-    Returns the selected path or None if cancelled.
-    """
+    """Open window to choose Mods folder."""
     if tk is None:
-        return None  # GUI isn't available
+        return None
 
-    # Create and hide main window (we only want the folder picker)
     root = tk.Tk()
     root.withdraw()
 
-    # Pop up a message to help the user
     messagebox.showinfo(
         "Sims 4 Mod Manager",
         "Please select your Sims 4 'Mods' folder."
     )
 
-    # Ask the user to pick a folder
     selected = filedialog.askdirectory(
         title="Select your Sims 4 'Mods' folder"
     )
+
     root.destroy()
 
     if selected:
@@ -45,59 +43,110 @@ def pick_mods_folder():
 
 
 def get_timestamp():
-    """Returns a timestamp string for naming backup folders."""
+    """Returns a timestamp string."""
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def backup_mods_folder(mods_path):
-    """
-    Makes a full backup of the Mods folder before any changes happen.
-    This prevents the user from losing their mods if something goes wrong.
-    """
-    # Add a new folder inside Mods called _Backup
-    backup_folder = mods_path / "_Backup"
-    backup_folder.mkdir(exist_ok=True)  # Create folder if it does not exist yet
+    """Make backup into Mods/_Backup."""
+    backup_root = mods_path / "_Backup"
+    backup_root.mkdir(exist_ok=True)
 
-    # Create a new timestamped backup folder
-    new_backup = backup_folder / f"Mods_Backup_{get_timestamp()}"
+    backup_folder = backup_root / f"Mods_Backup_{get_timestamp()}"
 
-    # Copy everything except folders we will create later
-    shutil.copytree(
-        mods_path,
-        new_backup,
-        ignore=shutil.ignore_patterns(
-            "_Backup", "_Organized", "_Quarantine", "_Duplicates", "_Reports"
-        )
+    ignore = shutil.ignore_patterns(
+        "_Backup", "_Organized", "_Quarantine", "_Duplicates", "_Reports"
     )
 
-    print("📦 Backup complete!")
-    print("Backup saved to:", new_backup)
-    return new_backup
+    print("📦 Creating backup...")
+    shutil.copytree(mods_path, backup_folder, ignore=ignore)
+    print("✅ Backup complete! Saved to:", backup_folder)
+
+    return backup_folder
+
+
+def organize_mods(mods_path):
+    """
+    Move files into:
+    - _Organized/Script_Mods
+    - _Organized/Package_CC
+    - _Organized/Other
+    """
+    organized_root = mods_path / "_Organized"
+    script_folder = organized_root / "Script_Mods"
+    package_folder = organized_root / "Package_CC"
+    other_folder = organized_root / "Other"
+
+    script_folder.mkdir(parents=True, exist_ok=True)
+    package_folder.mkdir(parents=True, exist_ok=True)
+    other_folder.mkdir(parents=True, exist_ok=True)
+
+    script_count = 0
+    package_count = 0
+    other_count = 0
+
+    ignore_dirs = {"_Backup", "_Organized", "_Quarantine", "_Duplicates", "_Reports"}
+
+    print("🔎 Organizing files...")
+
+    for root, dirs, files in os.walk(mods_path):
+        root_path = Path(root)
+
+        # skip our own folders
+        if any(ignored in root_path.parts for ignored in ignore_dirs):
+            continue
+
+        for filename in files:
+            file_path = root_path / filename
+
+            # skip if somehow inside special folders already
+            if any(ignored in file_path.parts for ignored in ignore_dirs):
+                continue
+
+            ext = file_path.suffix.lower()
+
+            if ext == SCRIPT_EXT:
+                dest = script_folder / filename
+                shutil.move(str(file_path), str(dest))
+                script_count += 1
+            elif ext == PACKAGE_EXT:
+                dest = package_folder / filename
+                shutil.move(str(file_path), str(dest))
+                package_count += 1
+            else:
+                dest = other_folder / filename
+                shutil.move(str(file_path), str(dest))
+                other_count += 1
+
+    print("✨ Organizing complete!")
+    print("Script mods moved   :", script_count)
+    print("Package files moved :", package_count)
+    print("Other files moved   :", other_count)
+
+    return script_count, package_count, other_count
 
 
 def main():
-    """
-    Main function that tries to get the Mods folder.
-    It checks the command-line first, then the GUI window if needed.
-    """
-    # If user typed a folder path in the terminal, use that first
+    """Main: select Mods, backup, then organize."""
     if len(sys.argv) > 1:
         mods_path = Path(sys.argv[1])
     else:
-        mods_path = pick_mods_folder()  # Ask the user to choose a folder
+        mods_path = pick_mods_folder()
 
-    # If nothing was selected or the path is invalid, stop here
     if not mods_path or not mods_path.exists():
-        print("\n⚠ ERROR: Mods folder not found!")
+        print("\n⚠ ERROR: Mods folder not found or not selected.")
         print("Example usage in a terminal:")
         print('python mod_manager.py "C:\\Users\\YourName\\Documents\\Electronic Arts\\The Sims 4\\Mods"')
         sys.exit(1)
 
-    print("\n🎉 Successfully selected Mods folder:")
+    print("\n🎉 Selected Mods folder:")
     print(mods_path)
 
-    print("\n[1/4] Backing up your Mods folder...")
+    print("\n[1/2] Backing up your Mods folder...")
     backup_mods_folder(mods_path)
+
+    print("\n[2/2] Organizing your mods by type...")
+    organize_mods(mods_path)
 
 
 if __name__ == "__main__":
