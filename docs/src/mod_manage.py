@@ -1,7 +1,7 @@
 """
 Sims 4 Mod Manager & Organizer
 
-What this script does:
+Features:
 1. Lets you select your Sims 4 Mods folder (CLI or GUI).
 2. Backs up the Mods folder into _Backup/Mods_Backup_<timestamp>.
 3. Organizes mods:
@@ -10,6 +10,8 @@ What this script does:
    - everything else -> _Organized/Other
    - zero-byte / unreadable files -> _Quarantine
 4. Saves a simple text report in _Reports with counts.
+5. Uses threads to organize files faster.
+6. Has a --fast mode to SKIP backup (use only when you’re sure).
 """
 
 import sys
@@ -17,6 +19,7 @@ import os
 import shutil
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Try to import Tkinter for a folder picker GUI.
 try:
@@ -29,7 +32,7 @@ except Exception:
 SCRIPT_EXT = ".ts4script"
 PACKAGE_EXT = ".package"
 
-# Folders our tool uses and should ignore when scanning
+# Special folders our tool creates and should ignore while scanning
 IGNORE_DIRS = {"_Backup", "_Organized", "_Quarantine", "_Duplicates", "_Reports"}
 
 
@@ -41,11 +44,10 @@ def pick_mods_folder():
     Returns a Path object or None if the user cancels.
     """
     if tk is None:
-        # GUI not available (e.g., no display)
-        return None
+        return None  # GUI not available
 
     root = tk.Tk()
-    root.withdraw()  # Hide main Tk window
+    root.withdraw()  # Hide main window
 
     messagebox.showinfo(
         "Sims 4 Mod Manager",
@@ -95,7 +97,7 @@ def backup_mods_folder(mods_path):
 
 # --------------- Broken File Check ---------------
 
-def is_broken_mod(file_path):
+def is_broken_mod(file_path: Path) -> bool:
     """
     Very simple broken check:
     - If the file is 0 bytes, treat as broken.
@@ -111,15 +113,87 @@ def is_broken_mod(file_path):
         return True
 
 
-# --------------- Organizing Logic ---------------
+# --------------- File Listing (for threading + countdown) ---------------
 
-def organize_mods(mods_path):
+def list_mod_files(mods_path: Path):
     """
-    Walk all files under the Mods folder and:
-    - Move .ts4script files into _Organized/Script_Mods
-    - Move .package files into _Organized/Package_CC
-    - Move all other files into _Organized/Other
-    - Broken files into _Quarantine
+    Walk the Mods folder and return a list of all files
+    we actually want to process (ignores our special folders).
+    """
+    files = []
+    for root, dirs, filenames in os.walk(mods_path):
+        root_path = Path(root)
+
+        # Skip our special folders early
+        if any(ignored in root_path.parts for ignored in IGNORE_DIRS):
+            continue
+
+        for name in filenames:
+            file_path = root_path / name
+
+            # Extra safety: skip if already inside special folders
+            if any(ignored in file_path.parts for ignored in IGNORE_DIRS):
+                continue
+
+            files.append(file_path)
+
+    return files
+
+
+# --------------- Per-file Worker (used by threads) ---------------
+
+def process_single_file(file_path: Path,
+                        script_folder: Path,
+                        package_folder: Path,
+                        other_folder: Path,
+                        quarantine_folder: Path) -> str:
+    """
+    Process one file:
+    - If broken -> move to _Quarantine
+    - Else sort by extension into Script_Mods, Package_CC, or Other
+
+    Returns one of: "script", "package", "other", "broken"
+    """
+    try:
+        # Check if broken
+        if is_broken_mod(file_path):
+            dest = quarantine_folder / file_path.name
+            shutil.move(str(file_path), str(dest))
+            return "broken"
+
+        ext = file_path.suffix.lower()
+
+        if ext == SCRIPT_EXT:
+            dest = script_folder / file_path.name
+            shutil.move(str(file_path), str(dest))
+            return "script"
+        elif ext == PACKAGE_EXT:
+            dest = package_folder / file_path.name
+            shutil.move(str(file_path), str(dest))
+            return "package"
+        else:
+            dest = other_folder / file_path.name
+            shutil.move(str(file_path), str(dest))
+            return "other"
+
+    except Exception:
+        # If something goes wrong, best effort: quarantine it
+        try:
+            dest = quarantine_folder / file_path.name
+            shutil.move(str(file_path), str(dest))
+        except Exception:
+            pass
+        return "broken"
+
+
+# --------------- Organizing Logic (Threaded + Countdown) ---------------
+
+def organize_mods(mods_path: Path):
+    """
+    Use threads to speed up organizing:
+    - First, build a list of all files to touch.
+    - Then process them in a thread pool.
+    - Show a progress counter: "Processing X/Y files..."
 
     Returns a dict with stats.
     """
@@ -134,51 +208,59 @@ def organize_mods(mods_path):
     other_folder.mkdir(parents=True, exist_ok=True)
     quarantine_folder.mkdir(parents=True, exist_ok=True)
 
+    # List all files once (used for both total count + work list)
+    files = list_mod_files(mods_path)
+    total_files = len(files)
+
+    if total_files == 0:
+        print("No files found to organize.")
+        return {
+            "Script Mods Organized": 0,
+            "Package Files Organized": 0,
+            "Other Files Organized": 0,
+            "Broken Mods Quarantined": 0,
+        }
+
+    print(f"🔎 Organizing files with threading... Total Mods Found: {total_files}\n")
+
     script_count = 0
     package_count = 0
     other_count = 0
     broken_count = 0
 
-    print("🔎 Scanning and organizing files...")
+    # Number of threads (you can tweak this; 4 is safe for most)
+    max_workers = 4
 
-    for root, dirs, files in os.walk(mods_path):
-        root_path = Path(root)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(
+                process_single_file,
+                file_path,
+                script_folder,
+                package_folder,
+                other_folder,
+                quarantine_folder
+            )
+            for file_path in files
+        ]
 
-        # Skip our own management folders (_Backup, _Organized, etc.)
-        if any(ignored in root_path.parts for ignored in IGNORE_DIRS):
-            continue
+        # as_completed gives us futures as they finish
+        for i, future in enumerate(as_completed(futures), start=1):
+            result = future.result()
 
-        for filename in files:
-            file_path = root_path / filename
-
-            # Skip if somehow already in our special folders
-            if any(ignored in file_path.parts for ignored in IGNORE_DIRS):
-                continue
-
-            # Check if the file seems broken
-            if is_broken_mod(file_path):
-                dest = quarantine_folder / filename
-                shutil.move(str(file_path), str(dest))
-                broken_count += 1
-                print("🛑 Broken mod moved to _Quarantine:", filename)
-                continue
-
-            ext = file_path.suffix.lower()
-
-            if ext == SCRIPT_EXT:
-                dest = script_folder / filename
-                shutil.move(str(file_path), str(dest))
+            if result == "script":
                 script_count += 1
-            elif ext == PACKAGE_EXT:
-                dest = package_folder / filename
-                shutil.move(str(file_path), str(dest))
+            elif result == "package":
                 package_count += 1
-            else:
-                dest = other_folder / filename
-                shutil.move(str(file_path), str(dest))
+            elif result == "other":
                 other_count += 1
+            elif result == "broken":
+                broken_count += 1
 
-    print("✨ Organizing complete!")
+            # Progress line
+            print(f"Processing {i}/{total_files} files...", end="\r")
+
+    print("\n\n✨ Organizing complete!")
     print("Script mods moved      :", script_count)
     print("Package files moved    :", package_count)
     print("Other files moved      :", other_count)
@@ -196,7 +278,7 @@ def organize_mods(mods_path):
 
 # --------------- Reporting ---------------
 
-def save_report(mods_path, stats):
+def save_report(mods_path: Path, stats: dict):
     """
     Saves a simple text report in Mods/_Reports/report_<timestamp>.txt
     with counts of what the script did.
@@ -221,43 +303,57 @@ def save_report(mods_path, stats):
 def main():
     """
     Main function:
-    1. Get Mods folder (CLI or GUI).
-    2. Back up Mods folder.
-    3. Organize mods and quarantine broken ones.
-    4. Save a small report.
+    1. Parse args and check for --fast.
+    2. Get Mods folder (CLI or GUI).
+    3. Back up Mods folder (unless --fast).
+    4. Organize mods using threads.
+    5. Save a summary report.
     """
 
-    # 1. Find Mods folder
-    if len(sys.argv) > 1:
-        # Example: python mod_manager.py "C:\path\to\Mods"
-        mods_path = Path(sys.argv[1])
+    # -------- Parse command-line arguments --------
+    fast_mode = False
+    args = sys.argv[1:]  # everything after script name
+
+    if "--fast" in args:
+        fast_mode = True
+        args.remove("--fast")
+
+    if args:
+        # If the user gave a path, use that as Mods folder
+        mods_path = Path(args[0])
     else:
+        # Otherwise, use the GUI picker
         mods_path = pick_mods_folder()
 
     # Validate path
     if not mods_path or not mods_path.exists():
         print("\n⚠ ERROR: Mods folder not found or not selected.")
-        print("Example usage in a terminal:")
-        print('python mod_manager.py "C:\\Users\\YourName\\Documents\\Electronic Arts\\The Sims 4\\Mods"')
+        print("Examples:")
+        print('  python mod_manager.py "C:\\Users\\YourName\\Documents\\Electronic Arts\\The Sims 4\\Mods"')
+        print('  python mod_manager.py --fast "C:\\Users\\YourName\\Documents\\Electronic Arts\\The Sims 4\\Mods"')
         sys.exit(1)
 
     print("\n🎉 Selected Mods folder:")
     print(mods_path)
 
-    # 2. Backup
-    print("\n[1/3] Backing up your Mods folder...")
-    backup_mods_folder(mods_path)
+    # -------- Backup (unless fast mode) --------
+    if fast_mode:
+        print("\n[FAST MODE] Skipping backup to speed things up.")
+        print("⚠ Use this only if you already have a safe backup!")
+    else:
+        print("\n[1/3] Backing up your Mods folder...")
+        backup_mods_folder(mods_path)
 
-    # 3. Organize + quarantine
+    # -------- Organize (threaded) --------
     print("\n[2/3] Organizing your mods by type and quarantining broken files...")
     stats = organize_mods(mods_path)
 
-    # 4. Report
+    # -------- Report --------
     print("\n[3/3] Saving report...")
     save_report(mods_path, stats)
 
     print("\n✅ All done!")
-    print("- Check _Backup for your backups")
+    print("- Check _Backup for your backups (unless you used --fast)")
     print("- Check _Organized for sorted mods")
     print("- Check _Quarantine for broken mods")
     print("- Check _Reports for the summary file")
